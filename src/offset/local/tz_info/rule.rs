@@ -858,6 +858,23 @@ mod tests {
     }
 
     #[test]
+    fn test_implicit_dst_offset_out_of_range() {
+        // The DST offset defaults to one hour east of standard time. A standard offset of
+        // -23:59:59 would push the implicit DST offset to +24:59:59, which does not fit
+        // in a `FixedOffset` and must be rejected.
+        assert!(matches!(
+            TransitionRule::from_tz_string(b"AAA-23:59:59BBB,J1,J365", false),
+            Err(Error::LocalTimeType(_))
+        ));
+        assert!(TransitionRule::from_tz_string(b"AAA-23:59:59BBB,J1,J365", true).is_err());
+        // A standard offset of -22:59:59 gives an implicit DST offset of exactly the
+        // maximum representable +23:59:59 and is accepted.
+        assert!(TransitionRule::from_tz_string(b"AAA-22:59:59BBB,J1,J365", false).is_ok());
+        // Large positive (west of Greenwich) offsets stay in range with implicit DST.
+        assert!(TransitionRule::from_tz_string(b"AAA23:59:59BBB,J1,J365", false).is_ok());
+    }
+
+    #[test]
     fn test_all_year_dst() -> Result<(), Error> {
         let tz_string = b"EST5EDT,0/0,J365/25";
         assert!(TransitionRule::from_tz_string(tz_string, false).is_err());

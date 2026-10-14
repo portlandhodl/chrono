@@ -558,6 +558,12 @@ impl fmt::Debug for TimeZoneName {
     }
 }
 
+/// A UTC offset in seconds must fit in a `FixedOffset` to be usable, which is limited to
+/// ±23:59:59 (`-86_400 < offset < 86_400`, see `FixedOffset::east_opt`).
+const fn is_valid_ut_offset(ut_offset: i32) -> bool {
+    -86_400 < ut_offset && ut_offset < 86_400
+}
+
 /// Local time type associated to a time zone
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) struct LocalTimeType {
@@ -572,8 +578,8 @@ pub(crate) struct LocalTimeType {
 impl LocalTimeType {
     /// Construct a local time type
     pub(super) fn new(ut_offset: i32, is_dst: bool, name: Option<&[u8]>) -> Result<Self, Error> {
-        if ut_offset == i32::MIN {
-            return Err(Error::LocalTimeType("invalid UTC offset"));
+        if !is_valid_ut_offset(ut_offset) {
+            return Err(Error::LocalTimeType("UTC offset out of range"));
         }
 
         let name = match name {
@@ -586,8 +592,8 @@ impl LocalTimeType {
 
     /// Construct a local time type with the specified UTC offset in seconds
     pub(super) const fn with_offset(ut_offset: i32) -> Result<Self, Error> {
-        if ut_offset == i32::MIN {
-            return Err(Error::LocalTimeType("invalid UTC offset"));
+        if !is_valid_ut_offset(ut_offset) {
+            return Err(Error::LocalTimeType("UTC offset out of range"));
         }
 
         Ok(Self { ut_offset, is_dst: false, name: None })
@@ -664,6 +670,31 @@ mod tests {
         ));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_ut_offset_out_of_range() {
+        // A UTC offset must fit in a `FixedOffset`, which is limited to ±23:59:59. An
+        // out-of-range offset used to be accepted here and panicked later when converted
+        // to a `FixedOffset` (e.g. in `Local::now()`).
+        assert!(matches!(LocalTimeType::new(86_400, false, None), Err(Error::LocalTimeType(_))));
+        assert!(matches!(LocalTimeType::new(-86_400, false, None), Err(Error::LocalTimeType(_))));
+        assert!(matches!(LocalTimeType::new(i32::MIN, false, None), Err(Error::LocalTimeType(_))));
+        assert!(matches!(LocalTimeType::with_offset(86_400), Err(Error::LocalTimeType(_))));
+        assert!(matches!(LocalTimeType::with_offset(-86_400), Err(Error::LocalTimeType(_))));
+        // The largest representable offsets are accepted.
+        assert!(LocalTimeType::new(86_399, false, None).is_ok());
+        assert!(LocalTimeType::new(-86_399, false, None).is_ok());
+        assert!(LocalTimeType::with_offset(86_399).is_ok());
+        assert!(LocalTimeType::with_offset(-86_399).is_ok());
+    }
+
+    #[test]
+    fn test_tzif_ut_offset_out_of_range() {
+        // A TZif `tt_utoff` of 86400 seconds (24 hours) does not fit in a `FixedOffset`,
+        // so the file must be rejected instead of panicking in `Local::now()`.
+        let bytes = b"TZif\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01\0\0\0\x01\0\x01Q\x80\0\0\0";
+        assert!(matches!(TimeZone::from_tz_data(bytes), Err(Error::LocalTimeType(_))));
     }
 
     #[test]
