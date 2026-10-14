@@ -415,7 +415,9 @@ impl TimeDelta {
         if secs <= i64::MIN as i128 || secs >= i64::MAX as i128 {
             return None;
         };
-        Some(TimeDelta { secs: secs as i64, nanos: nanos as i32 })
+        // `TimeDelta::new` rejects the product when it is out of the range of
+        // a proper `TimeDelta`, which is restricted to `i64` milliseconds.
+        TimeDelta::new(secs as i64, nanos as u32)
     }
 
     /// Divide a `TimeDelta` with a i32, returning `None` if dividing by 0.
@@ -1284,6 +1286,60 @@ mod tests {
             TimeDelta::try_milliseconds(-1500).unwrap() * 2,
             TimeDelta::try_seconds(-3).unwrap()
         );
+    }
+
+    #[test]
+    fn test_duration_checked_mul_bounds() {
+        let milliseconds = |ms| TimeDelta::try_milliseconds(ms).unwrap();
+
+        // Multiplying by 1 or -1 must keep the boundary values.
+        assert_eq!(TimeDelta::MAX.checked_mul(1), Some(TimeDelta::MAX));
+        assert_eq!(TimeDelta::MIN.checked_mul(1), Some(TimeDelta::MIN));
+        assert_eq!(TimeDelta::MAX.checked_mul(-1), Some(TimeDelta::MIN));
+        assert_eq!(TimeDelta::MIN.checked_mul(-1), Some(TimeDelta::MAX));
+
+        // The product must stay within the range of a `TimeDelta`
+        // (`i64` milliseconds), not within the range of `i64` seconds.
+        assert_eq!(TimeDelta::MAX.checked_mul(2), None);
+        assert_eq!(TimeDelta::MIN.checked_mul(2), None);
+        assert_eq!(TimeDelta::MAX.checked_mul(-2), None);
+        assert_eq!(TimeDelta::MIN.checked_mul(-2), None);
+        assert_eq!(milliseconds(i64::MAX / 2).checked_mul(2), Some(milliseconds(i64::MAX - 1)));
+        assert_eq!(milliseconds(-i64::MAX / 2).checked_mul(2), Some(milliseconds(-i64::MAX + 1)));
+        // These are 1 millisecond beyond the bounds of a `TimeDelta`.
+        assert_eq!(milliseconds(i64::MAX / 2 + 1).checked_mul(2), None);
+        assert_eq!(milliseconds(-i64::MAX / 2 - 1).checked_mul(2), None);
+        assert_eq!(milliseconds(i64::MAX).checked_mul(2), None);
+        assert_eq!(milliseconds(-i64::MAX).checked_mul(2), None);
+        // A small value multiplied by a large `i32` stays in range.
+        assert_eq!(
+            TimeDelta::nanoseconds(1).checked_mul(i32::MAX),
+            Some(TimeDelta::nanoseconds(i32::MAX as i64))
+        );
+
+        // Every product returned as `Some` must be a proper `TimeDelta`, so
+        // that e.g. `num_milliseconds` cannot overflow or silently wrap.
+        let bases = [
+            TimeDelta::MIN,
+            TimeDelta::MIN + TimeDelta::nanoseconds(1),
+            milliseconds(-i64::MAX / 2 - 1),
+            milliseconds(-1),
+            TimeDelta::zero(),
+            milliseconds(1),
+            milliseconds(i64::MAX / 2 + 1),
+            TimeDelta::MAX - TimeDelta::nanoseconds(1),
+            TimeDelta::MAX,
+        ];
+        for base in bases {
+            for rhs in [i32::MIN, -1_000_000_000, -2, -1, 0, 1, 2, 1_000_000_000, i32::MAX] {
+                let Some(product) = base.checked_mul(rhs) else { continue };
+                assert!((TimeDelta::MIN..=TimeDelta::MAX).contains(&product));
+                let millis = product.num_milliseconds();
+                let expected = product.num_seconds() as i128 * 1_000
+                    + product.subsec_nanos() as i128 / 1_000_000;
+                assert_eq!(millis as i128, expected);
+            }
+        }
     }
 
     #[test]
