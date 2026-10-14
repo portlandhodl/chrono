@@ -189,15 +189,20 @@ impl<Tz: TimeZone> DurationRound for DateTime<Tz> {
     type Err = RoundingError;
 
     fn duration_round(self, duration: TimeDelta) -> Result<Self, Self::Err> {
-        duration_round(self.naive_local(), self, duration)
+        // The local datetime can be out of range even when the UTC datetime is not; the offset
+        // may push it past the representable range of `NaiveDateTime`.
+        let naive = self.checked_naive_local().ok_or(RoundingError::TimestampExceedsLimit)?;
+        duration_round(naive, self, duration)
     }
 
     fn duration_trunc(self, duration: TimeDelta) -> Result<Self, Self::Err> {
-        duration_trunc(self.naive_local(), self, duration)
+        let naive = self.checked_naive_local().ok_or(RoundingError::TimestampExceedsLimit)?;
+        duration_trunc(naive, self, duration)
     }
 
     fn duration_round_up(self, duration: TimeDelta) -> Result<Self, Self::Err> {
-        duration_round_up(self.naive_local(), self, duration)
+        let naive = self.checked_naive_local().ok_or(RoundingError::TimestampExceedsLimit)?;
+        duration_round_up(naive, self, duration)
     }
 }
 
@@ -1091,5 +1096,47 @@ mod tests {
         // this issue is because abs(i64::MIN) == i64::MAX + 1
         let dt = DateTime::from_timestamp_nanos(i64::MIN + 2);
         assert_eq!(dt.duration_round_up(span).unwrap(), DateTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn test_duration_round_local_out_of_range() {
+        // The UTC instant is in range, but the offset pushes the local datetime out of the
+        // representable range of `NaiveDateTime`. This used to panic in `naive_local()`; it
+        // must return `Err(RoundingError::TimestampExceedsLimit)`, just like the same instant
+        // with a `Utc` offset.
+        let span = TimeDelta::seconds(1);
+
+        let edge = DateTime::<Utc>::MAX_UTC.with_timezone(&FixedOffset::east_opt(1).unwrap());
+        assert_eq!(edge.duration_trunc(span), Err(RoundingError::TimestampExceedsLimit));
+        assert_eq!(edge.duration_round(span), Err(RoundingError::TimestampExceedsLimit));
+        assert_eq!(edge.duration_round_up(span), Err(RoundingError::TimestampExceedsLimit));
+
+        let edge = DateTime::<Utc>::MIN_UTC.with_timezone(&FixedOffset::west_opt(1).unwrap());
+        assert_eq!(edge.duration_trunc(span), Err(RoundingError::TimestampExceedsLimit));
+        assert_eq!(edge.duration_round(span), Err(RoundingError::TimestampExceedsLimit));
+        assert_eq!(edge.duration_round_up(span), Err(RoundingError::TimestampExceedsLimit));
+
+        // A local datetime shifted to exactly the edge of `NaiveDateTime`'s range is still
+        // representable, and errors through the regular nanosecond timestamp limit.
+        let edge = (DateTime::<Utc>::MAX_UTC - TimeDelta::seconds(1))
+            .with_timezone(&FixedOffset::east_opt(1).unwrap());
+        assert_eq!(edge.duration_trunc(span), Err(RoundingError::TimestampExceedsLimit));
+        let edge = (DateTime::<Utc>::MIN_UTC + TimeDelta::seconds(1))
+            .with_timezone(&FixedOffset::west_opt(1).unwrap());
+        assert_eq!(edge.duration_round(span), Err(RoundingError::TimestampExceedsLimit));
+
+        // Control: the same boundary instants with a `Utc` offset already error the same way.
+        assert_eq!(
+            DateTime::<Utc>::MAX_UTC.duration_trunc(span),
+            Err(RoundingError::TimestampExceedsLimit)
+        );
+        assert_eq!(
+            DateTime::<Utc>::MAX_UTC.duration_round_up(span),
+            Err(RoundingError::TimestampExceedsLimit)
+        );
+        assert_eq!(
+            DateTime::<Utc>::MIN_UTC.duration_round(span),
+            Err(RoundingError::TimestampExceedsLimit)
+        );
     }
 }

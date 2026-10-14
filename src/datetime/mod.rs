@@ -574,9 +574,15 @@ impl<Tz: TimeZone> DateTime<Tz> {
     #[inline]
     #[must_use]
     pub fn naive_local(&self) -> NaiveDateTime {
-        self.datetime
-            .checked_add_offset(self.offset.fix())
-            .expect("Local time out of range for `NaiveDateTime`")
+        self.checked_naive_local().expect("Local time out of range for `NaiveDateTime`")
+    }
+
+    /// Returns the naive local datetime, or `None` if the offset from UTC would push the local
+    /// datetime outside of the representable range of a [`NaiveDateTime`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn checked_naive_local(&self) -> Option<NaiveDateTime> {
+        self.datetime.checked_add_offset(self.offset.fix())
     }
 
     /// Returns the naive local datetime.
