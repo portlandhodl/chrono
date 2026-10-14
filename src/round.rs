@@ -3,7 +3,7 @@
 
 //! Functionality for rounding or truncating a `DateTime` by a `TimeDelta`.
 
-use crate::{DateTime, NaiveDateTime, TimeDelta, TimeZone, Timelike};
+use crate::{DateTime, NaiveDateTime, NaiveTime, TimeDelta, TimeZone, Timelike};
 use core::cmp::Ordering;
 use core::fmt;
 use core::ops::{Add, Sub};
@@ -18,6 +18,8 @@ pub trait SubsecRound {
     /// Return a copy rounded to the specified number of subsecond digits. With
     /// 9 or more digits, self is returned unmodified. Halfway values are
     /// rounded up (away from zero).
+    /// If rounding up would produce a value outside the representable range,
+    /// self is returned unmodified.
     ///
     /// # Example
     /// ``` rust
@@ -49,9 +51,37 @@ pub trait SubsecRound {
     fn trunc_subsecs(self, digits: u16) -> Self;
 }
 
+/// Addition of a `TimeDelta` that reports overflow instead of panicking like
+/// the `Add` impls of the datetime types, so that [`SubsecRound`] can handle
+/// values at the edge of the representable range.
+#[doc(hidden)]
+pub trait CheckedAddTimeDelta: Sized {
+    fn checked_add(&self, rhs: TimeDelta) -> Option<Self>;
+}
+
+impl CheckedAddTimeDelta for NaiveDateTime {
+    fn checked_add(&self, rhs: TimeDelta) -> Option<NaiveDateTime> {
+        self.checked_add_signed(rhs)
+    }
+}
+
+impl CheckedAddTimeDelta for NaiveTime {
+    fn checked_add(&self, rhs: TimeDelta) -> Option<NaiveTime> {
+        // Adding a `TimeDelta` to a `NaiveTime` wraps around midnight and
+        // cannot overflow.
+        Some(self.overflowing_add_signed(rhs).0)
+    }
+}
+
+impl<Tz: TimeZone> CheckedAddTimeDelta for DateTime<Tz> {
+    fn checked_add(&self, rhs: TimeDelta) -> Option<DateTime<Tz>> {
+        self.clone().checked_add_signed(rhs)
+    }
+}
+
 impl<T> SubsecRound for T
 where
-    T: Timelike + Add<TimeDelta, Output = T> + Sub<TimeDelta, Output = T>,
+    T: Timelike + CheckedAddTimeDelta + Sub<TimeDelta, Output = T>,
 {
     fn round_subsecs(self, digits: u16) -> T {
         let span = span_for_digits(digits);
@@ -59,8 +89,12 @@ where
         if delta_down > 0 {
             let delta_up = span - delta_down;
             if delta_up <= delta_down {
-                self + TimeDelta::nanoseconds(delta_up.into())
+                // Rounding up from a value near the maximum of the
+                // representable range would overflow; return it unchanged.
+                self.checked_add(TimeDelta::nanoseconds(delta_up.into())).unwrap_or(self)
             } else {
+                // `delta_down <= self.nanosecond()`, so this stays within the
+                // current second and cannot go out of range.
                 self - TimeDelta::nanoseconds(delta_down.into())
             }
         } else {
@@ -380,7 +414,7 @@ mod tests {
     use super::{DurationRound, RoundingError, SubsecRound, TimeDelta};
     use crate::Timelike;
     use crate::offset::{FixedOffset, TimeZone, Utc};
-    use crate::{DateTime, NaiveDate};
+    use crate::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 
     #[test]
     fn test_round_subsecs() {
@@ -444,6 +478,34 @@ mod tests {
 
         assert_eq!(dt.round_subsecs(0).nanosecond(), 0);
         assert_eq!(dt.round_subsecs(0).second(), 0);
+    }
+
+    #[test]
+    fn test_round_subsecs_min_max() {
+        // Rounding `NaiveDateTime::MAX` up to a whole digit boundary would
+        // exceed the representable range; it must not panic and returns the
+        // value unchanged.
+        for digits in 0..=8u16 {
+            assert_eq!(NaiveDateTime::MAX.round_subsecs(digits), NaiveDateTime::MAX);
+            assert_eq!(
+                NaiveDateTime::MAX.and_utc().round_subsecs(digits),
+                NaiveDateTime::MAX.and_utc()
+            );
+            assert_eq!(NaiveDateTime::MIN.round_subsecs(digits), NaiveDateTime::MIN);
+            assert_eq!(
+                NaiveDateTime::MIN.and_utc().round_subsecs(digits),
+                NaiveDateTime::MIN.and_utc()
+            );
+        }
+        assert_eq!(NaiveDateTime::MAX.round_subsecs(9), NaiveDateTime::MAX);
+
+        // Rounding down just above `MIN` stays in range.
+        let just_above_min = NaiveDateTime::MIN + TimeDelta::nanoseconds(1);
+        assert_eq!(just_above_min.round_subsecs(0), NaiveDateTime::MIN);
+
+        // `NaiveTime` keeps wrapping around midnight.
+        let time = NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_999).unwrap();
+        assert_eq!(time.round_subsecs(0), NaiveTime::from_hms_opt(0, 0, 0).unwrap());
     }
 
     #[test]
