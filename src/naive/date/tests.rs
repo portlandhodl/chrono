@@ -928,6 +928,59 @@ fn test_rkyv_validation() {
     let date_max = NaiveDate::MAX;
     let bytes = rkyv::to_bytes::<_, 4>(&date_max).unwrap();
     assert_eq!(rkyv::from_bytes::<NaiveDate>(&bytes).unwrap(), date_max);
+
+    // Boundary dates that make use of the full ordinal range remain valid.
+    let date = NaiveDate::from_yo_opt(2023, 365).unwrap(); // Dec 31, common year
+    let bytes = rkyv::to_bytes::<_, 4>(&date).unwrap();
+    assert_eq!(rkyv::from_bytes::<NaiveDate>(&bytes).unwrap(), date);
+    let date = NaiveDate::from_yo_opt(2024, 366).unwrap(); // Dec 31, leap year
+    let bytes = rkyv::to_bytes::<_, 4>(&date).unwrap();
+    assert_eq!(rkyv::from_bytes::<NaiveDate>(&bytes).unwrap(), date);
+
+    // The internal sentinel values `NaiveDate::BEFORE_MIN` and `NaiveDate::AFTER_MAX`
+    // (one year of headroom on either side of the public range) remain valid.
+    let mut crafted = bytes.to_vec();
+    for yof in [
+        ((MIN_YEAR - 1) << 13) | (366 << 4) | 0o07, // BEFORE_MIN
+        ((MAX_YEAR + 1) << 13) | (1 << 4) | 0o17,   // AFTER_MAX
+    ] {
+        crafted.copy_from_slice(&yof.to_ne_bytes());
+        assert!(rkyv::from_bytes::<NaiveDate>(&crafted).is_ok());
+    }
+}
+
+#[test]
+#[cfg(feature = "rkyv-validation")]
+fn test_rkyv_validation_rejects_invalid() {
+    let date = NaiveDate::from_ymd_opt(2023, 3, 1).unwrap();
+    let bytes = rkyv::to_bytes::<_, 4>(&date).unwrap();
+    let mut crafted = bytes.to_vec();
+
+    // `yof` packs the year, ordinal and year flags into a `NonZeroI32`. The value below
+    // encodes an ordinal of 1023 and used to pass the derived validation; the out-of-range
+    // ordinal made `Datelike::month` index beyond a lookup table.
+    let yof: i32 = (2023 << 13) | (1023 << 4) | 0b1111;
+    crafted.copy_from_slice(&yof.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveDate>(&crafted).is_err());
+
+    // A zero `yof` violates the `NonZeroI32` invariant.
+    crafted.copy_from_slice(&0i32.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveDate>(&crafted).is_err());
+
+    // Craft archives around the boundaries of the packed value.
+    let valid_yof = i32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+    for yof in [
+        valid_yof & !(0x1ff << 4),                  // ordinal 0
+        (valid_yof & !(0x1ff << 4)) | (367 << 4),   // ordinal 367
+        (valid_yof & !(0x1ff << 4)) | (366 << 4),   // ordinal 366 in a common year
+        valid_yof ^ 0b0101,                         // year flags inconsistent with the year
+        (valid_yof & !0b1011) | 0b1000,             // zeroed weekday part of the year flags
+        ((MIN_YEAR - 2) << 13) | (366 << 4) | 0o07, // year two below the public range
+        ((MAX_YEAR + 2) << 13) | (1 << 4) | 0o17,   // year two above the public range
+    ] {
+        crafted.copy_from_slice(&yof.to_ne_bytes());
+        assert!(rkyv::from_bytes::<NaiveDate>(&crafted).is_err());
+    }
 }
 
 //   MAX_YEAR-12-31 minus 0000-01-01

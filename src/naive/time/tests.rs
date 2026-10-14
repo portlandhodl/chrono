@@ -387,4 +387,34 @@ fn test_rkyv_validation() {
     let t_max = NaiveTime::MAX;
     let bytes = rkyv::to_bytes::<_, 8>(&t_max).unwrap();
     assert_eq!(rkyv::from_bytes::<NaiveTime>(&bytes).unwrap(), t_max);
+
+    // A leap second remains valid.
+    let t_leap = NaiveTime::from_hms_nano_opt(23, 59, 59, 1_500_000_000).unwrap();
+    let bytes = rkyv::to_bytes::<_, 8>(&t_leap).unwrap();
+    assert_eq!(rkyv::from_bytes::<NaiveTime>(&bytes).unwrap(), t_leap);
+}
+
+#[test]
+#[cfg(feature = "rkyv-validation")]
+fn test_rkyv_validation_rejects_invalid() {
+    let time = NaiveTime::from_hms_nano_opt(12, 34, 56, 789_789_789).unwrap();
+    let bytes = rkyv::to_bytes::<_, 8>(&time).unwrap().to_vec();
+
+    // Find the two `u32` fields in the archive.
+    let secs_off = bytes.windows(4).position(|w| w == 45_296u32.to_ne_bytes()).unwrap();
+    let frac_off = bytes.windows(4).position(|w| w == 789_789_789u32.to_ne_bytes()).unwrap();
+
+    // A number of seconds in the day of 86_400 or more must be rejected.
+    let mut crafted = bytes.clone();
+    crafted[secs_off..secs_off + 4].copy_from_slice(&86_400u32.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveTime>(&crafted).is_err());
+
+    // A subsecond value of 2 seconds or more must be rejected.
+    let mut crafted = bytes.clone();
+    crafted[frac_off..frac_off + 4].copy_from_slice(&2_000_000_000u32.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveTime>(&crafted).is_err());
+
+    let mut crafted = bytes.clone();
+    crafted[frac_off..frac_off + 4].copy_from_slice(&u32::MAX.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveTime>(&crafted).is_err());
 }

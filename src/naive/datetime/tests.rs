@@ -403,3 +403,33 @@ fn test_rkyv_validation() {
     let bytes = rkyv::to_bytes::<_, 12>(&dt_max).unwrap();
     assert_eq!(rkyv::from_bytes::<NaiveDateTime>(&bytes).unwrap(), dt_max);
 }
+
+#[test]
+#[cfg(feature = "rkyv-validation")]
+fn test_rkyv_validation_rejects_invalid() {
+    let date = NaiveDate::from_ymd_opt(2023, 3, 1).unwrap();
+    let time = crate::NaiveTime::from_hms_nano_opt(9, 10, 11, 155).unwrap();
+    let dt = NaiveDateTime::new(date, time);
+    let date_bytes = rkyv::to_bytes::<_, 4>(&date).unwrap();
+    let time_bytes = rkyv::to_bytes::<_, 8>(&time).unwrap();
+    let bytes = rkyv::to_bytes::<_, 12>(&dt).unwrap();
+    assert_eq!(rkyv::from_bytes::<NaiveDateTime>(&bytes).unwrap(), dt);
+
+    // `NaiveDateTime` derives its `CheckBytes` implementation; it defers to the
+    // hand-written semantic checks of the `NaiveDate` and `NaiveTime` it consists of.
+    let mut crafted = bytes.to_vec();
+    let pos = crafted.windows(4).position(|w| w == &date_bytes[..]).unwrap();
+    let yof: i32 = (2023 << 13) | (1023 << 4) | 0b1111;
+    crafted[pos..pos + 4].copy_from_slice(&yof.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveDateTime>(&crafted).is_err());
+
+    let mut crafted = bytes.to_vec();
+    let pos = crafted.windows(8).position(|w| w == &time_bytes[..]).unwrap();
+    // `secs` is the first `u32` of the archived `NaiveTime`.
+    assert_eq!(
+        u32::from_ne_bytes(crafted[pos..pos + 4].try_into().unwrap()),
+        9 * 3600 + 10 * 60 + 11
+    );
+    crafted[pos..pos + 4].copy_from_slice(&86_400u32.to_ne_bytes());
+    assert!(rkyv::from_bytes::<NaiveDateTime>(&crafted).is_err());
+}
