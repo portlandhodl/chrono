@@ -484,6 +484,18 @@ impl<'a> StrftimeItems<'a> {
             return Some((remainder, self.error(original, remainder)));
         }
 
+        // POSIX `E` and `O` modifiers select the locale's alternative era representation
+        // (e.g. the Thai solar calendar year for `%EY` under `th_TH`). Chrono has no support
+        // for alternative eras, so we degrade gracefully like glibc and other strftime
+        // implementations do when no alternative era is defined for a locale: skip the
+        // modifier and treat the specifier as if it was absent. This also keeps locale
+        // format strings containing era modifiers (as shipped by pure-rust-locales for
+        // e.g. `th_TH`) formatting instead of erroring out.
+        let spec = match spec {
+            'E' | 'O' => next!(),
+            _ => spec,
+        };
+
         macro_rules! queue {
             [$head:expr, $($tail:expr),+ $(,)*] => ({
                 const QUEUE: &'static [Item<'static>] = &[$($tail),+];
@@ -656,10 +668,16 @@ impl<'a> StrftimeItems<'a> {
         fallback: &'static [Item<'static>],
     ) -> Item<'a> {
         if let Some(locale) = self.locale {
-            assert!(self.locale_str.is_empty());
-            let (fmt_str, item) = self.parse_next_item(localized_fmt_str(locale)).unwrap();
-            self.locale_str = fmt_str;
-            item
+            // We should always enter with `locale_str` empty, and a locale format string
+            // should not end mid-specifier. Never panic on unexpected data: it may come
+            // from a different version of the locales crate than this code was built for.
+            if self.locale_str.is_empty() {
+                if let Some((fmt_str, item)) = self.parse_next_item(localized_fmt_str(locale)) {
+                    self.locale_str = fmt_str;
+                    return item;
+                }
+            }
+            Item::Error
         } else {
             self.queue = &fallback[1..];
             fallback[0].clone()
@@ -900,6 +918,19 @@ mod tests {
             [internal_fixed(InternalInternal::TimezoneOffsetPermissive)]
         );
         assert_eq!(parse_and_collect("%#m"), [Item::Error]);
+        // era modifiers are ignored, the specifier is parsed as usual
+        assert_eq!(parse_and_collect("%Od"), [num0(Day)]);
+        assert_eq!(parse_and_collect("%EY"), [num0(Year)]);
+        assert_eq!(parse_and_collect("%Ey"), [num0(YearMod100)]);
+        assert_eq!(parse_and_collect("%OH:%OM"), [num0(Hour), Literal(":"), num0(Minute)]);
+        assert_eq!(parse_and_collect("%-Od"), [num(Day)]);
+        assert_eq!(parse_and_collect("%Op"), [fixed(Fixed::UpperAmPm)]);
+        // unknown suffixes are an error, as with any other unrecognized specifier
+        assert_eq!(parse_and_collect("%E"), [Item::Error]);
+        assert_eq!(parse_and_collect("%O"), [Item::Error]);
+        assert_eq!(parse_and_collect("%EQ"), [Item::Error]);
+        assert_eq!(parse_and_collect("%OQ"), [Item::Error]);
+        assert_eq!(parse_and_collect("%E-"), [Item::Error]);
     }
 
     #[test]
@@ -1160,6 +1191,53 @@ mod tests {
         assert_eq!(dt2.format_localized("%X", Locale::hy_AM).to_string(), "18:54:32");
         assert_eq!(dt1.format_localized("%X", Locale::chr_US).to_string(), "06:54:32 ᏌᎾᎴ");
         assert_eq!(dt2.format_localized("%X", Locale::chr_US).to_string(), "06:54:32 ᏒᎯᏱᎢᏗᏢ");
+    }
+
+    /// The locale format strings of these locales contain POSIX era modifiers (`%E` and
+    /// `%O`, e.g. `th_TH` has D_FMT `"%d/%m/%Ey"`). Formatting them used to produce a
+    /// formatting error, which panics when converted to a `String`. Chrono has no support
+    /// for alternative eras and ignores the modifier instead.
+    #[test]
+    #[cfg(all(feature = "unstable-locales", feature = "alloc"))]
+    fn test_strftime_localized_era_modifiers() {
+        let dt = Utc.with_ymd_and_hms(2024, 1, 1, 13, 45, 30).unwrap();
+        let locales = [
+            Locale::az_IR,
+            Locale::fa_IR,
+            Locale::lo_LA,
+            Locale::lzh_TW,
+            Locale::mnw_MM,
+            Locale::my_MM,
+            Locale::or_IN,
+            Locale::shn_MM,
+            Locale::th_TH,
+        ];
+        for locale in locales {
+            for specifier in ["%x", "%c", "%X", "%r"] {
+                assert!(!dt.format_localized(specifier, locale).to_string().is_empty());
+            }
+            // `%x` only needs a date, so also exercise the `NaiveDate` path.
+            let date = dt.date_naive();
+            assert!(!date.format_localized("%x", locale).to_string().is_empty());
+        }
+    }
+
+    /// The era modifiers `E` and `O` are accepted after `%` and ignored, both in localized
+    /// and in standalone format strings. `%Od` formats like `%d`, `%EY` like `%Y`, etc.
+    #[test]
+    #[cfg(feature = "alloc")]
+    fn test_strftime_era_modifiers_ignored() {
+        let dt =
+            FixedOffset::east_opt(34200).unwrap().with_ymd_and_hms(2001, 7, 8, 0, 34, 59).unwrap();
+        assert_eq!(dt.format("%Od").to_string(), dt.format("%d").to_string());
+        assert_eq!(dt.format("%Oe").to_string(), dt.format("%e").to_string());
+        assert_eq!(dt.format("%EC %EY %Ey").to_string(), dt.format("%C %Y %y").to_string());
+        assert_eq!(dt.format("%OH:%OM:%OS %Op").to_string(), dt.format("%H:%M:%S %p").to_string());
+        assert_eq!(dt.format("%Ex").to_string(), dt.format("%x").to_string());
+        assert_eq!(dt.format("%EX").to_string(), dt.format("%X").to_string());
+        assert_eq!(dt.format("%Ec").to_string(), dt.format("%c").to_string());
+        // Padding and era modifiers can be combined.
+        assert_eq!(dt.format("%-Od").to_string(), dt.format("%-d").to_string());
     }
 
     #[test]
