@@ -676,7 +676,8 @@ impl<Tz: TimeZone> DateTime<Tz> {
     #[must_use]
     pub fn to_rfc3339_opts(&self, secform: SecondsFormat, use_z: bool) -> String {
         let mut result = String::with_capacity(38);
-        write_rfc3339(&mut result, self.naive_local(), self.offset.fix(), secform, use_z)
+        let naive = self.overflowing_naive_local();
+        write_rfc3339(&mut result, naive, self.offset.fix(), secform, use_z)
             .expect("writing rfc3339 datetime to string should never fail");
         result
     }

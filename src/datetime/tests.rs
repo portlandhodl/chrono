@@ -900,6 +900,23 @@ fn test_rfc3339_opts_nonexhaustive() {
 }
 
 #[test]
+#[cfg(feature = "alloc")]
+fn test_rfc3339_opts_out_of_range_local() {
+    use crate::SecondsFormat::*;
+    // A `DateTime` whose UTC value is in range, but whose local rendering overflows
+    // `NaiveDateTime`, must not panic and must produce the same output as `to_rfc3339`.
+    let beyond_max =
+        FixedOffset::east_opt(2 * 60 * 60).unwrap().from_utc_datetime(&NaiveDateTime::MAX);
+    assert_eq!(beyond_max.to_rfc3339_opts(AutoSi, false), beyond_max.to_rfc3339());
+    assert_eq!(beyond_max.to_rfc3339_opts(Secs, false), "+262143-01-01T01:59:59+02:00");
+
+    let beyond_min =
+        FixedOffset::west_opt(2 * 60 * 60).unwrap().from_utc_datetime(&NaiveDateTime::MIN);
+    assert_eq!(beyond_min.to_rfc3339_opts(AutoSi, false), beyond_min.to_rfc3339());
+    assert_eq!(beyond_min.to_rfc3339_opts(Secs, false), "-262144-12-31T22:00:00-02:00");
+}
+
+#[test]
 fn test_datetime_from_str() {
     assert_eq!(
         "2015-02-18T23:16:9.15Z".parse::<DateTime<FixedOffset>>(),

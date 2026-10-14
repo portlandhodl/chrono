@@ -40,7 +40,7 @@ impl<Tz: TimeZone> ser::Serialize for DateTime<Tz> {
 
         impl<Tz: TimeZone> fmt::Display for FormatIso8601<'_, Tz> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                let naive = self.inner.naive_local();
+                let naive = self.inner.overflowing_naive_local();
                 let offset = self.inner.offset.fix();
                 write_rfc3339(f, naive, offset, SecondsFormat::AutoSi, true)
             }
@@ -1347,5 +1347,31 @@ mod tests {
         let decoded: DateTime<FixedOffset> = serde_json::from_str(&encoded).unwrap();
         assert_eq!(dt, decoded);
         assert_eq!(dt.offset().fix(), *decoded.offset());
+    }
+
+    #[test]
+    fn test_serde_serialize_out_of_range_local() {
+        use crate::NaiveDateTime;
+
+        // Serializing a `DateTime` whose UTC value is in range, but whose local rendering
+        // overflows `NaiveDateTime`, must not panic and must produce the same output as
+        // `to_rfc3339`.
+        let beyond_max = DateTime::<FixedOffset>::from_naive_utc_and_offset(
+            NaiveDateTime::MAX,
+            FixedOffset::east_opt(2 * 60 * 60).unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_string(&beyond_max).unwrap(),
+            format!("\"{}\"", beyond_max.to_rfc3339())
+        );
+
+        let beyond_min = DateTime::<FixedOffset>::from_naive_utc_and_offset(
+            NaiveDateTime::MIN,
+            FixedOffset::west_opt(2 * 60 * 60).unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_string(&beyond_min).unwrap(),
+            format!("\"{}\"", beyond_min.to_rfc3339())
+        );
     }
 }
